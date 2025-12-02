@@ -4,7 +4,18 @@ import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
 
-from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, AssistantMessage, TextBlock, create_sdk_mcp_server
+from claude_agent_sdk import (
+    ClaudeSDKClient,
+    ClaudeAgentOptions,
+    AssistantMessage,
+    TextBlock,
+    ToolUseBlock,
+    ToolResultBlock,
+    ThinkingBlock,
+    ResultMessage,
+    SystemMessage,
+    create_sdk_mcp_server
+)
 
 from src.config import AgentConfig
 from src.integrations.gitlab_client import GitLabClient
@@ -73,12 +84,43 @@ class DevTeamAgent:
             tools=self.tools
         )
 
+        # System prompt for the agent
+        system_prompt = """你是 DevTeam Agent，一个专业的团队工作管理助手。你的主要职责是帮助团队生成和管理周报。
+
+## 周报生成规则
+
+当你使用 `generate_weekly_report` 工具生成周报后，你必须：
+
+1. **仔细分析**获取到的所有活动数据（GitLab 提交、MR、Jira 工时等）
+2. **撰写一段有意义的总结**，放在周报的"🤖 Agent 总结"部分
+3. 总结应该包含：
+   - 本周主要完成的工作（用简洁的语言概括）
+   - 工作重点和亮点
+   - 如果有的话，提及跨项目或跨团队的协作
+
+## 总结示例
+
+好的总结示例：
+> 本周主要工作集中在 Portal 系统优化和公告栏功能开发。完成了 3 个 MR 的代码审核，修复了项目管理列表数据不正确的问题。Jira 工时共 40 小时，主要投入在方案预研和功能开发上。
+
+## 注意事项
+
+- 总结要简洁，不超过 3-4 句话
+- 使用中文
+- 基于实际数据，不要编造内容
+- 如果活动较少，如实说明即可
+
+## 可用团队成员
+{team_members}
+"""
+
         # Initialize Claude client
         tool_names = [f"mcp__devteam__{tool.name}" for tool in self.tools]
         options = ClaudeAgentOptions(
             mcp_servers={"devteam": self.mcp_server},
             allowed_tools=["Read", "Write"] + tool_names,
-            permission_mode="acceptEdits"
+            permission_mode="acceptEdits",
+            system_prompt=system_prompt.format(team_members=", ".join(self.config.team_members))
         )
 
         self.client = ClaudeSDKClient(options)
@@ -120,18 +162,36 @@ class DevTeamAgent:
                 print("已开始新对话（之前的上下文已清除）")
                 continue
 
-            # Send message
+            # Send message and show processing indicator
+            print("\n⏳ 正在处理...", flush=True)
             await self.client.query(user_input)
             self.turn_count += 1
 
-            # Process response
-            print(f"[{self.turn_count}] Agent: ", end="")
+            # Process response with progress feedback
+            response_started = False
             async for message in self.client.receive_response():
                 if isinstance(message, AssistantMessage):
                     for block in message.content:
-                        if isinstance(block, TextBlock):
-                            print(block.text, end="")
-            print()  # New line after response
+                        if isinstance(block, ToolUseBlock):
+                            # Show tool being called
+                            tool_display_name = block.name.replace("mcp__devteam__", "")
+                            print(f"🔧 调用工具: {tool_display_name}", flush=True)
+                        elif isinstance(block, ThinkingBlock):
+                            # Show thinking indicator
+                            print("🤔 思考中...", flush=True)
+                        elif isinstance(block, TextBlock):
+                            if not response_started:
+                                print(f"\n[{self.turn_count}] Agent: ", end="", flush=True)
+                                response_started = True
+                            print(block.text, end="", flush=True)
+                elif isinstance(message, ResultMessage):
+                    # Show completion status
+                    if message.duration_ms:
+                        duration_sec = message.duration_ms / 1000
+                        print(f"\n✅ 完成 (耗时: {duration_sec:.1f}s)", flush=True)
+
+            if not response_started:
+                print()  # New line if no text response
 
         await self.client.disconnect()
         print(f"\n对话结束，共 {self.turn_count} 轮。")

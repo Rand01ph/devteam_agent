@@ -112,7 +112,13 @@ def create_report_tools(report_manager, report_generator, config):
         return {
             "content": [{
                 "type": "text",
-                "text": f"已生成并保存 {member_name} 在第{week_num}周的周报:\n\n{report_content}"
+                "text": f"""已生成并保存 {member_name} 在第{week_num}周的周报:
+
+{report_content}
+
+⚠️ **重要**: 请根据以上活动数据，撰写一段简洁的总结（3-4句话），然后使用 `update_weekly_report` 工具将总结内容替换掉 "*[待 Agent 根据以上活动数据生成总结]*" 这段占位符。
+
+总结应包含：本周主要完成的工作、工作重点/亮点。"""
             }]
         }
 
