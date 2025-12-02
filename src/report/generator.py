@@ -46,11 +46,18 @@ class ReportGenerator:
         # Get Jira activity
         jira_activity = await self.jira.get_user_activity(jira_username, start_date, end_date)
 
-        # Format report
+        # Format report with new structure
         report_lines = []
 
-        # Summary section
+        # Section header
         report_lines.append("### 本周工作总结\n")
+
+        # Agent summary placeholder (will be filled by Agent)
+        report_lines.append("#### 🤖 Agent 总结\n")
+        report_lines.append("*[待 Agent 根据以下工作明细生成总结]*\n")
+
+        # Work details section
+        report_lines.append("#### 工作明细\n")
 
         has_content = False
 
@@ -61,7 +68,7 @@ class ReportGenerator:
             total_pushes = gitlab_activity["summary"]["total_pushes"]
             report_lines.append(f"**代码推送**: {total_pushes} 次推送 (共 {total_commits} 次提交)")
 
-            for push in gitlab_activity["push_events"]:  # Show all
+            for push in gitlab_activity["push_events"]:
                 commit_count = push.get("commit_count", 1)
                 ref = push.get("ref", "unknown")
                 commit_title = push.get("commit_title", "")
@@ -74,7 +81,7 @@ class ReportGenerator:
             has_content = True
             report_lines.append(f"**合并请求活动**: {gitlab_activity['summary']['total_merge_requests']} 个 MR 相关事件")
 
-            for mr in gitlab_activity["merge_request_events"]:  # Show all
+            for mr in gitlab_activity["merge_request_events"]:
                 action = mr.get("action_name", "操作")
                 title = mr.get("target_title", "")
                 iid = mr.get("target_iid", "")
@@ -88,7 +95,7 @@ class ReportGenerator:
             has_content = True
             report_lines.append(f"**GitLab Issue 活动**: {gitlab_activity['summary']['total_issues']} 个 Issue 相关事件")
 
-            for issue in gitlab_activity["issue_events"]:  # Show all
+            for issue in gitlab_activity["issue_events"]:
                 action = issue.get("action_name", "操作")
                 title = issue.get("target_title", "")
                 iid = issue.get("target_iid", "")
@@ -102,7 +109,7 @@ class ReportGenerator:
             has_content = True
             report_lines.append(f"**评论活动**: {gitlab_activity['summary']['total_comments']} 条评论")
 
-            for comment in gitlab_activity["comment_events"]:  # Show all
+            for comment in gitlab_activity["comment_events"]:
                 noteable_type = comment.get("noteable_type", "")
                 note_body = comment.get("note_body", "")[:80]
                 suffix = "..." if len(comment.get("note_body", "")) > 80 else ""
@@ -110,7 +117,7 @@ class ReportGenerator:
 
             report_lines.append("")
 
-        # Jira section - Worklogs (工时统计)
+        # Jira Worklogs (工时统计)
         jira_summary = jira_activity["summary"]
         if jira_summary.get("total_worklog_entries", 0) > 0:
             has_content = True
@@ -136,7 +143,7 @@ class ReportGenerator:
                 reverse=True
             )
 
-            for issue_key, data in sorted_issues:  # Show all
+            for issue_key, data in sorted_issues:
                 hours = data["total_seconds"] // 3600
                 minutes = (data["total_seconds"] % 3600) // 60
                 time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
@@ -149,8 +156,7 @@ class ReportGenerator:
             has_content = True
             report_lines.append(f"**Jira Issues**: 分配 {jira_summary['total_assigned']} 个, 创建 {jira_summary['total_reported']} 个")
 
-            # Show all involved issues
-            for issue in jira_activity["all_issues"]:  # Show all
+            for issue in jira_activity["all_issues"]:
                 issue_type = issue.get("type") or ""
                 status = issue.get("status") or "N/A"
                 type_emoji = self._get_issue_type_emoji(issue_type)
@@ -162,10 +168,6 @@ class ReportGenerator:
         # If no activity
         if not has_content:
             report_lines.append("本周暂无记录的活动。\n")
-
-        # Agent summary section placeholder
-        report_lines.append("### 🤖 Agent 总结\n")
-        report_lines.append("*[待 Agent 根据以上活动数据生成总结]*\n")
 
         return "\n".join(report_lines)
 

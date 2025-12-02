@@ -33,8 +33,11 @@ class MarkdownReportManager:
         """Ensure report file exists for the specified month, create if not."""
         file_path = self.get_report_file_path(year, month)
         if not file_path.exists():
-            # Create initial file with title
-            file_path.write_text(f"# {year}年{month}月团队周报\n\n")
+            # Create initial file with title and month summary section
+            file_path.write_text(
+                f"# {year}年{month}月团队周报\n\n"
+                f"# 本月工作总结\n\n"
+            )
         return file_path
 
     def read_report(self, year: int, month: int) -> str:
@@ -55,8 +58,8 @@ class MarkdownReportManager:
         Returns:
             The week section content, or None if not found
         """
-        # Match week section (# Week N or # 第N周)
-        pattern = rf"^# (?:Week {week_num}|第{week_num}周)$"
+        # Match week section: # 第N周 or # 第N周 MM.DD-MM.DD
+        pattern = rf"^# 第{week_num}周(?:\s+\d+\.\d+-\d+\.\d+)?$"
         lines = content.split("\n")
 
         start_idx = None
@@ -121,7 +124,9 @@ class MarkdownReportManager:
         month: int,
         week_num: int,
         member_name: str,
-        report_content: str
+        report_content: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None
     ) -> None:
         """
         Add or update a member's weekly report.
@@ -132,21 +137,32 @@ class MarkdownReportManager:
             week_num: Week number
             member_name: Team member name
             report_content: Report content (without member name heading)
+            start_date: Start date of the week (for header formatting)
+            end_date: End date of the week (for header formatting)
         """
         file_path = self.ensure_report_file_exists(year, month)
         content = file_path.read_text(encoding="utf-8")
 
-        # Ensure week section exists
-        week_header = f"# 第{week_num}周"
-        if week_header not in content:
-            content += f"\n{week_header}\n\n"
+        # Build week header with optional date range
+        if start_date and end_date:
+            date_range = f" {start_date.month}.{start_date.day}-{end_date.month}.{end_date.day}"
+        else:
+            date_range = ""
 
-        # Split by week sections
+        # Check if week section exists (with or without date range)
+        week_pattern = rf"^# 第{week_num}周(?:\s+\d+\.\d+-\d+\.\d+)?$"
+        week_exists = any(re.match(week_pattern, line) for line in content.split("\n"))
+
+        if not week_exists:
+            # Add new week section with team summary placeholder
+            week_header = f"# 第{week_num}周{date_range}"
+            content += f"\n{week_header}\n\n## 本周团队重点工作总结\n\n"
+
+        # Split by lines for processing
         lines = content.split("\n")
         new_lines = []
         in_target_week = False
-        in_target_member = False
-        target_week_pattern = rf"^# 第{week_num}周$"
+        target_week_pattern = rf"^# 第{week_num}周(?:\s+\d+\.\d+-\d+\.\d+)?$"
         target_member_pattern = rf"^## {re.escape(member_name)}$"
         member_section_added = False
 
@@ -173,7 +189,6 @@ class MarkdownReportManager:
 
             # In target week, check for target member
             if in_target_week and re.match(target_member_pattern, line):
-                in_target_member = True
                 new_lines.append(line)
                 # Skip old content until next member or end of week
                 i += 1
@@ -187,13 +202,15 @@ class MarkdownReportManager:
                 member_section_added = True
                 continue
 
-            # In target week, check if we hit another member (means target member doesn't exist yet)
+            # In target week, check if we hit another member (skip team summary section)
             if in_target_week and not member_section_added and line.startswith("## "):
-                # Insert target member before this member
-                new_lines.append(f"## {member_name}\n")
-                new_lines.append(report_content)
-                new_lines.append("")
-                member_section_added = True
+                # Skip "本周团队重点工作总结" section, add member after it
+                if "本周团队重点工作总结" not in line:
+                    # Insert target member before this member
+                    new_lines.append(f"## {member_name}\n")
+                    new_lines.append(report_content)
+                    new_lines.append("")
+                    member_section_added = True
 
             new_lines.append(line)
             i += 1

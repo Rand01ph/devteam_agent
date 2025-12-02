@@ -104,9 +104,10 @@ def create_report_tools(report_manager, report_generator, config):
             member_name, gitlab_username, jira_username, start_date, end_date
         )
 
-        # Save to file
+        # Save to file with date range for week header
         report_manager.add_or_update_member_report(
-            year, month, week_num, member_name, report_content
+            year, month, week_num, member_name, report_content,
+            start_date=start_date, end_date=end_date
         )
 
         return {
@@ -116,7 +117,7 @@ def create_report_tools(report_manager, report_generator, config):
 
 {report_content}
 
-⚠️ **重要**: 请根据以上活动数据，撰写一段简洁的总结（3-4句话），然后使用 `update_weekly_report` 工具将总结内容替换掉 "*[待 Agent 根据以上活动数据生成总结]*" 这段占位符。
+⚠️ **重要**: 请根据以上工作明细，撰写一段简洁的总结（3-4句话），然后使用 `update_weekly_report` 工具将总结内容替换掉 "*[待 Agent 根据以下工作明细生成总结]*" 这段占位符。
 
 总结应包含：本周主要完成的工作、工作重点/亮点。"""
             }]
