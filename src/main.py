@@ -1,7 +1,6 @@
 """DevTeam Agent - Main entry point."""
 
 import asyncio
-import os
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -15,6 +14,7 @@ from src.report.generator import ReportGenerator
 from src.tools.report_tools import create_report_tools
 from src.tools.gitlab_tools import create_gitlab_tools
 from src.tools.jira_tools import create_jira_tools
+from src.tools.time_tools import create_time_tools
 
 
 class DevTeamAgent:
@@ -23,7 +23,7 @@ class DevTeamAgent:
     def __init__(self):
         """Initialize the DevTeam Agent."""
         # Load environment variables
-        env_path = Path(__file__).parent / ".env"
+        env_path = Path(__file__).parent.parent / ".env"
         if env_path.exists():
             load_dotenv(env_path)
 
@@ -57,6 +57,7 @@ class DevTeamAgent:
 
         # Create MCP tools
         self.tools = []
+        self.tools.extend(create_time_tools())  # Time tools first for date/time awareness
         self.tools.extend(create_report_tools(
             self.report_manager,
             self.report_generator,
@@ -73,7 +74,7 @@ class DevTeamAgent:
         )
 
         # Initialize Claude client
-        tool_names = [f"mcp__devteam__{tool.__name__}" for tool in self.tools]
+        tool_names = [f"mcp__devteam__{tool.name}" for tool in self.tools]
         options = ClaudeAgentOptions(
             mcp_servers={"devteam": self.mcp_server},
             allowed_tools=["Read", "Write"] + tool_names,

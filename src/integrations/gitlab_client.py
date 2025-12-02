@@ -1,8 +1,49 @@
 """GitLab API client for fetching team activity."""
 
 import httpx
-from datetime import datetime, date, timedelta
+from datetime import date
 from typing import Optional
+from dataclasses import dataclass, field
+
+
+@dataclass
+class GitLabEvent:
+    """Represents a GitLab contribution event."""
+    id: int
+    action_name: str
+    target_type: Optional[str]
+    target_id: Optional[int]
+    target_iid: Optional[int]
+    target_title: Optional[str]
+    project_id: Optional[int]
+    created_at: str
+    push_data: Optional[dict] = None
+    note: Optional[dict] = None
+
+
+@dataclass
+class UserActivity:
+    """User activity summary."""
+    username: str
+    events: list[GitLabEvent] = field(default_factory=list)
+
+    # Categorized events
+    push_events: list[dict] = field(default_factory=list)
+    merge_request_events: list[dict] = field(default_factory=list)
+    issue_events: list[dict] = field(default_factory=list)
+    comment_events: list[dict] = field(default_factory=list)
+    other_events: list[dict] = field(default_factory=list)
+
+    @property
+    def summary(self) -> dict:
+        return {
+            "total_events": len(self.events),
+            "total_pushes": len(self.push_events),
+            "total_commits": sum(e.get("commit_count", 0) for e in self.push_events),
+            "total_merge_requests": len(self.merge_request_events),
+            "total_issues": len(self.issue_events),
+            "total_comments": len(self.comment_events)
+        }
 
 
 class GitLabClient:
@@ -14,8 +55,8 @@ class GitLabClient:
 
         Args:
             url: GitLab instance URL (e.g., https://gitlab.example.com)
-            token: Personal access token
-            project_ids: Specific project IDs to track, None = all accessible
+            token: Personal access token (needs read_user or api scope)
+            project_ids: Specific project IDs to track, None = all
         """
         self.url = url.rstrip("/")
         self.token = token
@@ -29,53 +70,77 @@ class GitLabClient:
         self,
         username: str,
         start_date: date,
-        end_date: date
+        end_date: date,
+        target_type: Optional[str] = None,
+        action: Optional[str] = None
     ) -> dict:
         """
-        Get user's activity for a specific date range.
+        Get user's contribution events for a specific date range.
+
+        Uses the /users/:id/events API endpoint.
 
         Args:
-            username: GitLab username
-            start_date: Start date
-            end_date: End date
+            username: GitLab username or user ID
+            start_date: Start date (after)
+            end_date: End date (before)
+            target_type: Filter by target type (issue, merge_request, etc.)
+            action: Filter by action type
 
         Returns:
-            Dictionary with activity summary
+            Dictionary with categorized activity
         """
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Get user ID
+            # Get user ID if username is provided
             user_id = await self._get_user_id(client, username)
             if not user_id:
                 return {
                     "error": f"User {username} not found",
-                    "commits": [],
-                    "merge_requests": [],
-                    "issues": []
+                    "username": username,
+                    "events": [],
+                    "push_events": [],
+                    "merge_request_events": [],
+                    "issue_events": [],
+                    "comment_events": [],
+                    "summary": {
+                        "total_events": 0,
+                        "total_pushes": 0,
+                        "total_commits": 0,
+                        "total_merge_requests": 0,
+                        "total_issues": 0,
+                        "total_comments": 0
+                    }
                 }
 
-            # Get commits
-            commits = await self._get_user_commits(client, user_id, start_date, end_date)
+            # Fetch all events using pagination
+            all_events = await self._fetch_user_events(
+                client, user_id, start_date, end_date, target_type, action
+            )
 
-            # Get merge requests
-            merge_requests = await self._get_user_merge_requests(client, user_id, start_date, end_date)
+            # Filter by project IDs if specified
+            if self.project_ids:
+                all_events = [e for e in all_events if e.get("project_id") in self.project_ids]
 
-            # Get issues
-            issues = await self._get_user_issues(client, user_id, start_date, end_date)
+            # Categorize events
+            activity = self._categorize_events(username, all_events)
 
             return {
                 "username": username,
-                "commits": commits,
-                "merge_requests": merge_requests,
-                "issues": issues,
-                "summary": {
-                    "total_commits": len(commits),
-                    "total_merge_requests": len(merge_requests),
-                    "total_issues": len(issues)
-                }
+                "user_id": user_id,
+                "events": all_events,
+                "push_events": activity.push_events,
+                "merge_request_events": activity.merge_request_events,
+                "issue_events": activity.issue_events,
+                "comment_events": activity.comment_events,
+                "other_events": activity.other_events,
+                "summary": activity.summary
             }
 
     async def _get_user_id(self, client: httpx.AsyncClient, username: str) -> Optional[int]:
         """Get user ID from username."""
+        # If username is already an ID, return it
+        if isinstance(username, int) or username.isdigit():
+            return int(username)
+
         try:
             response = await client.get(
                 f"{self.url}/api/v4/users",
@@ -87,153 +152,152 @@ class GitLabClient:
             if users:
                 return users[0]["id"]
         except Exception as e:
-            print(f"Error getting user ID: {e}")
+            print(f"Error getting user ID for {username}: {e}")
         return None
 
-    async def _get_user_commits(
+    async def _fetch_user_events(
         self,
         client: httpx.AsyncClient,
         user_id: int,
         start_date: date,
-        end_date: date
+        end_date: date,
+        target_type: Optional[str] = None,
+        action: Optional[str] = None
     ) -> list[dict]:
-        """Get user's commits in the date range."""
-        commits = []
-        projects = self.project_ids or await self._get_all_project_ids(client)
+        """
+        Fetch user events with pagination.
 
-        for project_id in projects:
+        Uses GET /users/:id/events endpoint.
+        """
+        all_events = []
+        page = 1
+        per_page = 100
+
+        while True:
+            params = {
+                "after": start_date.isoformat(),
+                "before": end_date.isoformat(),
+                "sort": "desc",
+                "page": page,
+                "per_page": per_page
+            }
+
+            if target_type:
+                params["target_type"] = target_type
+            if action:
+                params["action"] = action
+
             try:
                 response = await client.get(
-                    f"{self.url}/api/v4/projects/{project_id}/repository/commits",
+                    f"{self.url}/api/v4/users/{user_id}/events",
                     headers=self.headers,
-                    params={
-                        "since": start_date.isoformat(),
-                        "until": (end_date + timedelta(days=1)).isoformat(),
-                        "author_id": user_id,
-                        "per_page": 100
-                    }
+                    params=params
                 )
                 response.raise_for_status()
-                project_commits = response.json()
+                events = response.json()
 
-                for commit in project_commits:
-                    commits.append({
-                        "project_id": project_id,
-                        "sha": commit["id"][:8],
-                        "title": commit["title"],
-                        "message": commit["message"],
-                        "created_at": commit["created_at"],
-                        "web_url": commit["web_url"]
-                    })
+                if not events:
+                    break
+
+                all_events.extend(events)
+
+                # Check if we've reached the last page
+                if len(events) < per_page:
+                    break
+
+                page += 1
+
+                # Safety limit to avoid infinite loops
+                if page > 50:
+                    break
+
             except Exception as e:
-                print(f"Error getting commits for project {project_id}: {e}")
+                print(f"Error fetching events for user {user_id}, page {page}: {e}")
+                break
 
-        return commits
+        return all_events
 
-    async def _get_user_merge_requests(
-        self,
-        client: httpx.AsyncClient,
-        user_id: int,
-        start_date: date,
-        end_date: date
-    ) -> list[dict]:
-        """Get user's merge requests in the date range."""
-        merge_requests = []
+    def _categorize_events(self, username: str, events: list[dict]) -> UserActivity:
+        """Categorize events by type."""
+        activity = UserActivity(username=username)
 
-        try:
-            response = await client.get(
-                f"{self.url}/api/v4/merge_requests",
-                headers=self.headers,
-                params={
-                    "author_id": user_id,
-                    "created_after": start_date.isoformat(),
-                    "created_before": (end_date + timedelta(days=1)).isoformat(),
-                    "scope": "all",
-                    "per_page": 100
-                }
-            )
-            response.raise_for_status()
-            mrs = response.json()
+        for event in events:
+            action_name = event.get("action_name", "")
+            target_type = event.get("target_type")
 
-            for mr in mrs:
-                # Filter by project IDs if specified
-                if self.project_ids and mr["project_id"] not in self.project_ids:
-                    continue
+            event_info = {
+                "id": event.get("id"),
+                "action_name": action_name,
+                "project_id": event.get("project_id"),
+                "created_at": event.get("created_at"),
+                "target_id": event.get("target_id"),
+                "target_iid": event.get("target_iid"),
+                "target_title": event.get("target_title"),
+            }
 
-                merge_requests.append({
-                    "project_id": mr["project_id"],
-                    "iid": mr["iid"],
-                    "title": mr["title"],
-                    "state": mr["state"],
-                    "created_at": mr["created_at"],
-                    "merged_at": mr.get("merged_at"),
-                    "web_url": mr["web_url"]
+            # Push events (code commits)
+            if action_name == "pushed":
+                push_data = event.get("push_data", {})
+                event_info.update({
+                    "commit_count": push_data.get("commit_count", 0),
+                    "ref": push_data.get("ref"),
+                    "ref_type": push_data.get("ref_type"),
+                    "commit_from": push_data.get("commit_from"),
+                    "commit_to": push_data.get("commit_to"),
+                    "commit_title": push_data.get("commit_title"),
+                    "action": push_data.get("action")
                 })
-        except Exception as e:
-            print(f"Error getting merge requests: {e}")
+                activity.push_events.append(event_info)
 
-        return merge_requests
+            # Merge request events
+            elif target_type == "MergeRequest":
+                activity.merge_request_events.append(event_info)
 
-    async def _get_user_issues(
+            # Issue events
+            elif target_type == "Issue":
+                activity.issue_events.append(event_info)
+
+            # Comment/Note events
+            elif target_type == "Note" or action_name == "commented on":
+                note_data = event.get("note", {})
+                event_info.update({
+                    "note_body": note_data.get("body", "")[:200],  # Truncate long notes
+                    "noteable_type": note_data.get("noteable_type"),
+                    "noteable_id": note_data.get("noteable_id")
+                })
+                activity.comment_events.append(event_info)
+
+            # Other events (milestone, wiki, etc.)
+            else:
+                activity.other_events.append(event_info)
+
+            activity.events.append(event)
+
+        return activity
+
+    async def get_user_events_by_type(
         self,
-        client: httpx.AsyncClient,
-        user_id: int,
+        username: str,
         start_date: date,
-        end_date: date
+        end_date: date,
+        target_type: str
     ) -> list[dict]:
-        """Get issues assigned to user or created by user in the date range."""
-        issues = []
+        """
+        Get user events filtered by target type.
 
-        try:
-            # Get issues assigned to user
-            response = await client.get(
-                f"{self.url}/api/v4/issues",
-                headers=self.headers,
-                params={
-                    "assignee_id": user_id,
-                    "scope": "all",
-                    "per_page": 100
-                }
-            )
-            response.raise_for_status()
-            assigned_issues = response.json()
+        Args:
+            username: GitLab username
+            start_date: Start date
+            end_date: End date
+            target_type: One of: issue, merge_request, milestone, note, project, snippet, user
 
-            for issue in assigned_issues:
-                # Filter by project IDs if specified
-                if self.project_ids and issue["project_id"] not in self.project_ids:
-                    continue
-
-                # Filter by date range
-                created = datetime.fromisoformat(issue["created_at"].replace("Z", "+00:00"))
-                if start_date <= created.date() <= end_date:
-                    issues.append({
-                        "project_id": issue["project_id"],
-                        "iid": issue["iid"],
-                        "title": issue["title"],
-                        "state": issue["state"],
-                        "created_at": issue["created_at"],
-                        "closed_at": issue.get("closed_at"),
-                        "web_url": issue["web_url"]
-                    })
-        except Exception as e:
-            print(f"Error getting issues: {e}")
-
-        return issues
-
-    async def _get_all_project_ids(self, client: httpx.AsyncClient) -> list[int]:
-        """Get all accessible project IDs."""
-        try:
-            response = await client.get(
-                f"{self.url}/api/v4/projects",
-                headers=self.headers,
-                params={"membership": True, "per_page": 100}
-            )
-            response.raise_for_status()
-            projects = response.json()
-            return [p["id"] for p in projects]
-        except Exception as e:
-            print(f"Error getting projects: {e}")
-            return []
+        Returns:
+            List of events
+        """
+        result = await self.get_user_activity(
+            username, start_date, end_date, target_type=target_type
+        )
+        return result.get("events", [])
 
     async def get_issue_details(self, project_id: int, issue_iid: int) -> Optional[dict]:
         """
@@ -256,16 +320,79 @@ class GitLabClient:
                 issue = response.json()
 
                 return {
+                    "iid": issue["iid"],
                     "title": issue["title"],
-                    "description": issue["description"],
+                    "description": issue.get("description"),
                     "state": issue["state"],
                     "created_at": issue["created_at"],
                     "updated_at": issue["updated_at"],
                     "closed_at": issue.get("closed_at"),
                     "labels": issue.get("labels", []),
                     "assignees": [a["name"] for a in issue.get("assignees", [])],
+                    "author": issue.get("author", {}).get("name"),
                     "web_url": issue["web_url"]
                 }
             except Exception as e:
                 print(f"Error getting issue details: {e}")
+                return None
+
+    async def get_merge_request_details(self, project_id: int, mr_iid: int) -> Optional[dict]:
+        """
+        Get detailed information about a specific merge request.
+
+        Args:
+            project_id: Project ID
+            mr_iid: MR IID (internal ID)
+
+        Returns:
+            MR details or None if not found
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.get(
+                    f"{self.url}/api/v4/projects/{project_id}/merge_requests/{mr_iid}",
+                    headers=self.headers
+                )
+                response.raise_for_status()
+                mr = response.json()
+
+                return {
+                    "iid": mr["iid"],
+                    "title": mr["title"],
+                    "description": mr.get("description"),
+                    "state": mr["state"],
+                    "created_at": mr["created_at"],
+                    "updated_at": mr["updated_at"],
+                    "merged_at": mr.get("merged_at"),
+                    "source_branch": mr["source_branch"],
+                    "target_branch": mr["target_branch"],
+                    "labels": mr.get("labels", []),
+                    "assignees": [a["name"] for a in mr.get("assignees", [])],
+                    "author": mr.get("author", {}).get("name"),
+                    "web_url": mr["web_url"]
+                }
+            except Exception as e:
+                print(f"Error getting MR details: {e}")
+                return None
+
+    async def get_project_info(self, project_id: int) -> Optional[dict]:
+        """Get project information."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                response = await client.get(
+                    f"{self.url}/api/v4/projects/{project_id}",
+                    headers=self.headers
+                )
+                response.raise_for_status()
+                project = response.json()
+
+                return {
+                    "id": project["id"],
+                    "name": project["name"],
+                    "path": project["path"],
+                    "path_with_namespace": project["path_with_namespace"],
+                    "web_url": project["web_url"]
+                }
+            except Exception as e:
+                print(f"Error getting project info: {e}")
                 return None

@@ -10,7 +10,7 @@ def create_gitlab_tools(gitlab_client):
 
     @tool(
         "get_gitlab_user_activity",
-        "Get a user's GitLab activity (commits, MRs, issues) for a date range",
+        "Get a user's GitLab contribution events (pushes, MRs, issues, comments) for a date range",
         {
             "username": str,
             "start_date": str,  # ISO format: YYYY-MM-DD
@@ -18,7 +18,7 @@ def create_gitlab_tools(gitlab_client):
         }
     )
     async def get_gitlab_user_activity(args: dict[str, Any]):
-        """Get GitLab user activity."""
+        """Get GitLab user activity using the /users/:id/events API."""
         username = args["username"]
         start_date = date.fromisoformat(args["start_date"])
         end_date = date.fromisoformat(args["end_date"])
@@ -36,30 +36,62 @@ def create_gitlab_tools(gitlab_client):
         # Format output
         summary = activity["summary"]
         output = f"**{username} 的 GitLab 活动** ({start_date} 至 {end_date})\n\n"
-        output += f"- 提交: {summary['total_commits']}\n"
-        output += f"- 合并请求: {summary['total_merge_requests']}\n"
-        output += f"- Issues: {summary['total_issues']}\n\n"
+        output += f"- 总事件数: {summary['total_events']}\n"
+        output += f"- Push 次数: {summary['total_pushes']} (共 {summary['total_commits']} 次提交)\n"
+        output += f"- MR 相关事件: {summary['total_merge_requests']}\n"
+        output += f"- Issue 相关事件: {summary['total_issues']}\n"
+        output += f"- 评论: {summary['total_comments']}\n\n"
 
-        if activity["commits"]:
-            output += "**提交列表**:\n"
-            for commit in activity["commits"][:10]:  # Limit to 10
-                output += f"- `{commit['sha']}` {commit['title']}\n"
-            if len(activity["commits"]) > 10:
-                output += f"- ... 及其他 {len(activity['commits']) - 10} 次提交\n"
+        # Push events (code commits)
+        if activity["push_events"]:
+            output += "**代码推送**:\n"
+            for push in activity["push_events"][:10]:
+                commit_count = push.get("commit_count", 1)
+                ref = push.get("ref", "unknown")
+                commit_title = push.get("commit_title", "")
+                output += f"- 推送 {commit_count} 个提交到 `{ref}`: {commit_title}\n"
+            if len(activity["push_events"]) > 10:
+                output += f"- ... 及其他 {len(activity['push_events']) - 10} 次推送\n"
             output += "\n"
 
-        if activity["merge_requests"]:
-            output += "**合并请求**:\n"
-            for mr in activity["merge_requests"]:
-                state = mr['state']
-                output += f"- !{mr['iid']} [{state}] {mr['title']}\n"
+        # Merge request events
+        if activity["merge_request_events"]:
+            output += "**合并请求活动**:\n"
+            for mr in activity["merge_request_events"][:10]:
+                action = mr.get("action_name", "操作")
+                title = mr.get("target_title", "")
+                iid = mr.get("target_iid", "")
+                output += f"- {action} MR !{iid}: {title}\n"
+            if len(activity["merge_request_events"]) > 10:
+                output += f"- ... 及其他 {len(activity['merge_request_events']) - 10} 个 MR 事件\n"
             output += "\n"
 
-        if activity["issues"]:
-            output += "**Issues**:\n"
-            for issue in activity["issues"]:
-                state = issue['state']
-                output += f"- #{issue['iid']} [{state}] {issue['title']}\n"
+        # Issue events
+        if activity["issue_events"]:
+            output += "**Issue 活动**:\n"
+            for issue in activity["issue_events"][:10]:
+                action = issue.get("action_name", "操作")
+                title = issue.get("target_title", "")
+                iid = issue.get("target_iid", "")
+                output += f"- {action} Issue #{iid}: {title}\n"
+            if len(activity["issue_events"]) > 10:
+                output += f"- ... 及其他 {len(activity['issue_events']) - 10} 个 Issue 事件\n"
+            output += "\n"
+
+        # Comment events
+        if activity["comment_events"]:
+            output += "**评论活动**:\n"
+            for comment in activity["comment_events"][:5]:
+                noteable_type = comment.get("noteable_type", "")
+                note_body = comment.get("note_body", "")[:100]
+                output += f"- 在 {noteable_type} 上评论: {note_body}...\n"
+            if len(activity["comment_events"]) > 5:
+                output += f"- ... 及其他 {len(activity['comment_events']) - 5} 条评论\n"
+            output += "\n"
+
+        # Other events
+        if activity.get("other_events"):
+            output += f"**其他活动**: {len(activity['other_events'])} 个事件\n"
 
         return {
             "content": [{
@@ -91,21 +123,24 @@ def create_gitlab_tools(gitlab_client):
                 }]
             }
 
-        output = f"**Issue #{issue_iid}**: {details['title']}\n\n"
+        output = f"**Issue #{details['iid']}**: {details['title']}\n\n"
         output += f"**状态**: {details['state']}\n"
+        output += f"**作者**: {details.get('author', 'N/A')}\n"
         output += f"**创建时间**: {details['created_at']}\n"
         output += f"**更新时间**: {details['updated_at']}\n"
 
-        if details['closed_at']:
+        if details.get('closed_at'):
             output += f"**关闭时间**: {details['closed_at']}\n"
 
-        if details['labels']:
+        if details.get('labels'):
             output += f"**标签**: {', '.join(details['labels'])}\n"
 
-        if details['assignees']:
+        if details.get('assignees'):
             output += f"**分配给**: {', '.join(details['assignees'])}\n"
 
-        output += f"\n**描述**:\n{details['description']}\n"
+        if details.get('description'):
+            output += f"\n**描述**:\n{details['description']}\n"
+
         output += f"\n**链接**: {details['web_url']}"
 
         return {
@@ -115,4 +150,55 @@ def create_gitlab_tools(gitlab_client):
             }]
         }
 
-    return [get_gitlab_user_activity, get_gitlab_issue_details]
+    @tool(
+        "get_gitlab_mr_details",
+        "Get detailed information about a GitLab merge request",
+        {
+            "project_id": int,
+            "mr_iid": int
+        }
+    )
+    async def get_gitlab_mr_details(args: dict[str, Any]):
+        """Get GitLab merge request details."""
+        project_id = args["project_id"]
+        mr_iid = args["mr_iid"]
+
+        details = await gitlab_client.get_merge_request_details(project_id, mr_iid)
+
+        if not details:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"未找到 MR !{mr_iid} (project {project_id})"
+                }]
+            }
+
+        output = f"**MR !{details['iid']}**: {details['title']}\n\n"
+        output += f"**状态**: {details['state']}\n"
+        output += f"**作者**: {details.get('author', 'N/A')}\n"
+        output += f"**分支**: `{details['source_branch']}` → `{details['target_branch']}`\n"
+        output += f"**创建时间**: {details['created_at']}\n"
+        output += f"**更新时间**: {details['updated_at']}\n"
+
+        if details.get('merged_at'):
+            output += f"**合并时间**: {details['merged_at']}\n"
+
+        if details.get('labels'):
+            output += f"**标签**: {', '.join(details['labels'])}\n"
+
+        if details.get('assignees'):
+            output += f"**分配给**: {', '.join(details['assignees'])}\n"
+
+        if details.get('description'):
+            output += f"\n**描述**:\n{details['description']}\n"
+
+        output += f"\n**链接**: {details['web_url']}"
+
+        return {
+            "content": [{
+                "type": "text",
+                "text": output
+            }]
+        }
+
+    return [get_gitlab_user_activity, get_gitlab_issue_details, get_gitlab_mr_details]

@@ -1,7 +1,6 @@
 """Weekly report generator."""
 
-from datetime import date, timedelta
-from typing import Optional
+from datetime import date
 from ..integrations.gitlab_client import GitLabClient
 from ..integrations.jira_client import JiraClient
 
@@ -41,7 +40,7 @@ class ReportGenerator:
         Returns:
             Markdown formatted report
         """
-        # Get GitLab activity
+        # Get GitLab activity (using /users/:id/events API)
         gitlab_activity = await self.gitlab.get_user_activity(gitlab_username, start_date, end_date)
 
         # Get Jira activity
@@ -53,45 +52,158 @@ class ReportGenerator:
         # Summary section
         report_lines.append("### 本周工作总结\n")
 
-        # GitLab section
-        if gitlab_activity["summary"]["total_commits"] > 0:
-            report_lines.append(f"**代码提交**: {gitlab_activity['summary']['total_commits']} 次提交")
-            for commit in gitlab_activity["commits"][:5]:  # Show first 5
-                report_lines.append(f"  - `{commit['sha']}` {commit['title']} - [查看]({commit['web_url']})")
-            if len(gitlab_activity["commits"]) > 5:
-                report_lines.append(f"  - ... 及其他 {len(gitlab_activity['commits']) - 5} 次提交")
+        has_content = False
+
+        # GitLab Push Events (代码提交)
+        if gitlab_activity["summary"]["total_pushes"] > 0:
+            has_content = True
+            total_commits = gitlab_activity["summary"]["total_commits"]
+            total_pushes = gitlab_activity["summary"]["total_pushes"]
+            report_lines.append(f"**代码推送**: {total_pushes} 次推送 (共 {total_commits} 次提交)")
+
+            for push in gitlab_activity["push_events"][:5]:  # Show first 5
+                commit_count = push.get("commit_count", 1)
+                ref = push.get("ref", "unknown")
+                commit_title = push.get("commit_title", "")
+                report_lines.append(f"  - 推送 {commit_count} 个提交到 `{ref}`: {commit_title}")
+
+            if len(gitlab_activity["push_events"]) > 5:
+                report_lines.append(f"  - ... 及其他 {len(gitlab_activity['push_events']) - 5} 次推送")
             report_lines.append("")
 
+        # GitLab MR Events (合并请求)
         if gitlab_activity["summary"]["total_merge_requests"] > 0:
-            report_lines.append(f"**合并请求**: {gitlab_activity['summary']['total_merge_requests']} 个 MR")
-            for mr in gitlab_activity["merge_requests"]:
-                state_emoji = "✅" if mr["state"] == "merged" else "🔄" if mr["state"] == "opened" else "❌"
-                report_lines.append(f"  - {state_emoji} !{mr['iid']} {mr['title']} - [查看]({mr['web_url']})")
+            has_content = True
+            report_lines.append(f"**合并请求活动**: {gitlab_activity['summary']['total_merge_requests']} 个 MR 相关事件")
+
+            for mr in gitlab_activity["merge_request_events"][:5]:
+                action = mr.get("action_name", "操作")
+                title = mr.get("target_title", "")
+                iid = mr.get("target_iid", "")
+                action_emoji = self._get_action_emoji(action)
+                report_lines.append(f"  - {action_emoji} {action} MR !{iid}: {title}")
+
+            if len(gitlab_activity["merge_request_events"]) > 5:
+                report_lines.append(f"  - ... 及其他 {len(gitlab_activity['merge_request_events']) - 5} 个 MR 事件")
             report_lines.append("")
 
+        # GitLab Issue Events
         if gitlab_activity["summary"]["total_issues"] > 0:
-            report_lines.append(f"**GitLab Issues**: {gitlab_activity['summary']['total_issues']} 个问题")
-            for issue in gitlab_activity["issues"]:
-                state_emoji = "✅" if issue["state"] == "closed" else "🔄"
-                report_lines.append(f"  - {state_emoji} #{issue['iid']} {issue['title']} - [查看]({issue['web_url']})")
+            has_content = True
+            report_lines.append(f"**GitLab Issue 活动**: {gitlab_activity['summary']['total_issues']} 个 Issue 相关事件")
+
+            for issue in gitlab_activity["issue_events"][:5]:
+                action = issue.get("action_name", "操作")
+                title = issue.get("target_title", "")
+                iid = issue.get("target_iid", "")
+                action_emoji = self._get_action_emoji(action)
+                report_lines.append(f"  - {action_emoji} {action} Issue #{iid}: {title}")
+
+            if len(gitlab_activity["issue_events"]) > 5:
+                report_lines.append(f"  - ... 及其他 {len(gitlab_activity['issue_events']) - 5} 个 Issue 事件")
             report_lines.append("")
 
-        # Jira section
-        if jira_activity["summary"]["total_assigned"] > 0 or jira_activity["summary"]["total_reported"] > 0:
-            report_lines.append(f"**Jira Issues**: 分配 {jira_activity['summary']['total_assigned']} 个, 创建 {jira_activity['summary']['total_reported']} 个")
+        # GitLab Comments
+        if gitlab_activity["summary"]["total_comments"] > 0:
+            has_content = True
+            report_lines.append(f"**评论活动**: {gitlab_activity['summary']['total_comments']} 条评论")
+
+            for comment in gitlab_activity["comment_events"][:3]:
+                noteable_type = comment.get("noteable_type", "")
+                note_body = comment.get("note_body", "")[:50]
+                report_lines.append(f"  - 在 {noteable_type} 上评论: {note_body}...")
+
+            if len(gitlab_activity["comment_events"]) > 3:
+                report_lines.append(f"  - ... 及其他 {len(gitlab_activity['comment_events']) - 3} 条评论")
+            report_lines.append("")
+
+        # Jira section - Worklogs (工时统计)
+        jira_summary = jira_activity["summary"]
+        if jira_summary.get("total_worklog_entries", 0) > 0:
+            has_content = True
+            report_lines.append(f"**Jira 工时**: {jira_summary['total_time_spent_formatted']}")
+
+            # Group worklogs by issue for cleaner display
+            worklogs_by_issue = {}
+            for log in jira_activity.get("worklogs", []):
+                key = log["issue_key"]
+                if key not in worklogs_by_issue:
+                    worklogs_by_issue[key] = {
+                        "summary": log["issue_summary"],
+                        "total_seconds": 0,
+                        "entries": []
+                    }
+                worklogs_by_issue[key]["total_seconds"] += log["time_spent_seconds"]
+                worklogs_by_issue[key]["entries"].append(log)
+
+            # Show top issues by time spent
+            sorted_issues = sorted(
+                worklogs_by_issue.items(),
+                key=lambda x: x[1]["total_seconds"],
+                reverse=True
+            )[:5]
+
+            for issue_key, data in sorted_issues:
+                hours = data["total_seconds"] // 3600
+                minutes = (data["total_seconds"] % 3600) // 60
+                time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                summary = data["summary"][:50] + "..." if len(data["summary"]) > 50 else data["summary"]
+                report_lines.append(f"  - [{issue_key}]({self.jira.url}/browse/{issue_key}) **{time_str}**: {summary}")
+
+            if len(worklogs_by_issue) > 5:
+                report_lines.append(f"  - ... 及其他 {len(worklogs_by_issue) - 5} 个 Issue 的工时")
+            report_lines.append("")
+
+        # Jira Issues section
+        if jira_summary["total_assigned"] > 0 or jira_summary["total_reported"] > 0:
+            has_content = True
+            report_lines.append(f"**Jira Issues**: 分配 {jira_summary['total_assigned']} 个, 创建 {jira_summary['total_reported']} 个")
 
             # Show all involved issues
-            for issue in jira_activity["all_issues"]:
-                type_emoji = "🐛" if "bug" in issue["type"].lower() else "✨" if "feature" in issue["type"].lower() else "📋"
-                status_emoji = "✅" if issue["status"].lower() in ["done", "closed"] else "🔄"
+            for issue in jira_activity["all_issues"][:10]:
+                issue_type = issue.get("type") or ""
+                status = issue.get("status") or "N/A"
+                type_emoji = self._get_issue_type_emoji(issue_type)
+                status_emoji = "✅" if status.lower() in ["done", "closed", "resolved"] else "🔄"
                 report_lines.append(f"  - {type_emoji} {status_emoji} [{issue['key']}]({issue['url']}) {issue['summary']}")
+
+            if len(jira_activity["all_issues"]) > 10:
+                report_lines.append(f"  - ... 及其他 {len(jira_activity['all_issues']) - 10} 个 Issue")
             report_lines.append("")
 
         # If no activity
-        if not report_lines:
+        if not has_content:
             report_lines.append("本周暂无记录的活动。\n")
 
         return "\n".join(report_lines)
+
+    def _get_action_emoji(self, action: str) -> str:
+        """Get emoji for GitLab action."""
+        action_lower = action.lower()
+        if "closed" in action_lower or "merged" in action_lower:
+            return "✅"
+        elif "opened" in action_lower or "created" in action_lower:
+            return "🆕"
+        elif "approved" in action_lower:
+            return "👍"
+        elif "commented" in action_lower:
+            return "💬"
+        else:
+            return "🔄"
+
+    def _get_issue_type_emoji(self, issue_type: str) -> str:
+        """Get emoji for issue type."""
+        type_lower = issue_type.lower()
+        if "bug" in type_lower:
+            return "🐛"
+        elif "feature" in type_lower or "story" in type_lower:
+            return "✨"
+        elif "task" in type_lower:
+            return "📋"
+        elif "improvement" in type_lower:
+            return "🔧"
+        else:
+            return "📝"
 
     async def generate_team_weekly_summary(
         self,
