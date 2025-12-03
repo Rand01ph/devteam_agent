@@ -56,6 +56,10 @@ class ReportGenerator:
         report_lines.append("#### 🤖 Agent 总结\n")
         report_lines.append("*[待 Agent 根据以下工作明细生成总结]*\n")
 
+        # Personal summary placeholder (will be filled by team member)
+        report_lines.append("#### 个人总结\n")
+        report_lines.append("*[待成员填写个人总结]*\n")
+
         # Work details section
         report_lines.append("#### 工作明细\n")
 
