@@ -514,3 +514,79 @@ class MarkdownReportManager:
                 year, month = int(match.group(1)), int(match.group(2))
                 reports.append((year, month))
         return sorted(reports)
+
+    def update_team_summary(
+        self,
+        year: int,
+        month: int,
+        week_num: int,
+        summary_content: str
+    ) -> dict:
+        """
+        Update the team summary for a specific week.
+
+        Args:
+            year: Year of the report
+            month: Month of the report
+            week_num: Week number
+            summary_content: The new summary content
+
+        Returns:
+            A dict with success status and message
+        """
+        file_path = self.get_report_file_path(year, month)
+        if not file_path.exists():
+            return {"success": False, "error": "Report file not found"}
+
+        content = file_path.read_text(encoding="utf-8")
+        sections = self.parse_markdown(content)
+
+        # Find week section
+        week_pattern = rf"^第{week_num}周(?:\s+\d+\.\d+-\d+\.\d+)?$"
+        week_idx = None
+        week_end_idx = None
+
+        for i, section in enumerate(sections):
+            if section.level == 1 and re.match(week_pattern, section.title):
+                week_idx = i
+                for j in range(i + 1, len(sections)):
+                    if sections[j].level == 1:
+                        week_end_idx = j
+                        break
+                if week_end_idx is None:
+                    week_end_idx = len(sections)
+                break
+
+        if week_idx is None:
+            return {"success": False, "error": f"Week {week_num} not found"}
+
+        # Find team summary section within the week
+        summary_idx = None
+        for i in range(week_idx + 1, week_end_idx):
+            if sections[i].level == 2 and "本周团队重点工作总结" in sections[i].title:
+                summary_idx = i
+                break
+
+        if summary_idx is None:
+            # Create new team summary section after week header
+            new_summary = MarkdownSection(
+                level=2,
+                title="本周团队重点工作总结",
+                content=summary_content
+            )
+            # Insert after week header (and after "待整理周报" if exists)
+            insert_idx = week_idx + 1
+            for i in range(week_idx + 1, week_end_idx):
+                if sections[i].level == 2 and "待整理周报" in sections[i].title:
+                    insert_idx = i + 1
+                    break
+            sections.insert(insert_idx, new_summary)
+        else:
+            # Update existing summary
+            sections[summary_idx].content = summary_content
+
+        # Write back
+        new_content = self.sections_to_markdown(sections)
+        file_path.write_text(new_content, encoding="utf-8")
+
+        return {"success": True, "message": f"已更新第{week_num}周的团队工作总结"}
