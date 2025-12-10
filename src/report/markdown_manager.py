@@ -61,16 +61,24 @@ class MarkdownReportManager:
         """
         Parse markdown content into a list of sections.
         Only parses top-level structure (# headings).
+        Correctly handles code blocks (ignores headings inside code blocks).
         """
         sections = []
         lines = content.split("\n")
         current_section = None
         content_lines = []
+        in_code_block = False
 
         for line in lines:
-            # Check if it's a heading
+            # Track code block state
+            if line.strip().startswith("```"):
+                in_code_block = not in_code_block
+                content_lines.append(line)
+                continue
+
+            # Check if it's a heading (only outside code blocks)
             heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
-            if heading_match:
+            if heading_match and not in_code_block:
                 # Save previous section
                 if current_section is not None:
                     current_section.content = "\n".join(content_lines).strip()
@@ -302,37 +310,113 @@ class MarkdownReportManager:
                 raw_content = sections[i].content
                 break
 
-        if raw_content_idx is None or not raw_content.strip():
-            return {"success": False, "error": "未找到 '待整理周报' 段落或内容为空"}
+        if raw_content_idx is None:
+            return {"success": False, "error": "未找到 '待整理周报' 段落"}
 
-        # Parse member content from raw_content
-        # The raw content contains ## 成员名 sections
-        # We need to parse these from the raw text
-        member_pattern = r"^##\s+(.+)$"
-        lines = raw_content.split("\n")
-
+        # Strategy 1: Check for raw text content within the "待整理周报" section itself
+        # This handles the case where member content is pasted as raw text (## 成员名 in content)
+        # Also supports content wrapped in ```markdown code blocks
         members_data = {}  # {member_name: content}
-        current_member = None
-        current_content = []
 
-        for line in lines:
-            member_match = re.match(member_pattern, line)
-            if member_match:
-                # Save previous member
-                if current_member:
-                    members_data[current_member] = "\n".join(current_content).strip()
-                current_member = member_match.group(1).strip()
-                current_content = []
-            else:
-                if current_member:
-                    current_content.append(line)
+        if raw_content.strip():
+            # Check if content is wrapped in a markdown code block
+            code_block_match = re.search(r"```(?:markdown)?\s*\n(.*?)```", raw_content, re.DOTALL)
+            if code_block_match:
+                # Extract content from code block
+                raw_content = code_block_match.group(1)
 
-        # Don't forget the last member
-        if current_member:
-            members_data[current_member] = "\n".join(current_content).strip()
+            # Match ## member_name but exclude numbered sections like "## 1." or "## 2. xxx"
+            member_pattern = r"^##\s+(.+)$"
+            numbered_section_pattern = r"^\d+\.\s*"  # Matches "1. " or "2. xxx"
+            lines = raw_content.split("\n")
+            current_member = None
+            current_content = []
 
+            for line in lines:
+                member_match = re.match(member_pattern, line)
+                if member_match:
+                    potential_member = member_match.group(1).strip()
+                    # Skip numbered sections (like "## 1. xxx" or "## 2. xxx")
+                    if not re.match(numbered_section_pattern, potential_member):
+                        if current_member:
+                            members_data[current_member] = "\n".join(current_content).strip()
+                        current_member = potential_member
+                        current_content = []
+                    else:
+                        # It's a numbered section, treat as content
+                        if current_member:
+                            current_content.append(line)
+                else:
+                    if current_member:
+                        current_content.append(line)
+
+            if current_member:
+                members_data[current_member] = "\n".join(current_content).strip()
+
+        # Strategy 2: Check for sibling sections after "待整理周报" that are member sections
+        # These are level-2 sections that appear after 待整理周报 but are NOT:
+        # - 本周团队重点工作总结
+        # - Already properly structured members (with ### 本周工作总结 subsection)
+        special_sections = {"待整理周报", "本周团队重点工作总结"}
+
+        for i in range(raw_content_idx + 1, week_end_idx):
+            section = sections[i]
+            if section.level == 2 and section.title not in special_sections:
+                member_name = section.title
+
+                # Check if this member is already properly structured
+                # A properly structured member has ### 本周工作总结 as the next section
+                is_structured = False
+                if i + 1 < week_end_idx:
+                    next_section = sections[i + 1]
+                    if next_section.level == 3 and "本周工作总结" in next_section.title:
+                        is_structured = True
+
+                # If not structured, this is raw content that needs organizing
+                if not is_structured:
+                    # Collect all content for this member until next level-2 or end
+                    member_content_parts = [section.content] if section.content else []
+                    for j in range(i + 1, week_end_idx):
+                        sub_section = sections[j]
+                        if sub_section.level <= 2:
+                            break
+                        # Include subsection content
+                        heading = "#" * sub_section.level + " " + sub_section.title
+                        member_content_parts.append(heading)
+                        if sub_section.content:
+                            member_content_parts.append(sub_section.content)
+
+                    if member_name not in members_data:
+                        members_data[member_name] = "\n\n".join(member_content_parts).strip()
+
+        # Strategy 3: Check for unorganized content at the end of the file (outside any week section)
+        # This happens when users paste content at the wrong location
         if not members_data:
-            return {"success": False, "error": "未在待整理周报中找到成员内容（格式：## 成员名）"}
+            orphan_members = []
+            for i in range(week_end_idx, len(sections)):
+                section = sections[i]
+                if section.level == 2:
+                    # Check if it looks like a member section (not a special section)
+                    if section.title not in special_sections and not re.match(r"^\d+\.", section.title):
+                        # Check if it's unstructured (no ### 本周工作总结 following)
+                        is_structured = False
+                        if i + 1 < len(sections):
+                            next_section = sections[i + 1]
+                            if next_section.level == 3 and "本周工作总结" in next_section.title:
+                                is_structured = True
+                        if not is_structured:
+                            orphan_members.append(section.title)
+
+            if orphan_members:
+                return {
+                    "success": False,
+                    "error": f"在文件末尾发现未整理的成员内容: {', '.join(orphan_members)}\n"
+                             f"这些内容位于周报 section 之外。请将这些内容移动到 '## 待整理周报' 段落下方，"
+                             f"然后重新运行整理命令。\n\n"
+                             f"提示：检查是否有错误的 '#' 标题（如 '# 1. xxx'）把内容切断了。"
+                }
+
+            return {"success": False, "error": "未在待整理周报中找到成员内容。\n请确保成员内容放在 '## 待整理周报' 段落后面，格式为 '## 成员名'。"}
 
         # Build new week sections
         new_week_sections = [sections[week_idx]]  # Keep week header
@@ -340,13 +424,21 @@ class MarkdownReportManager:
         # Add empty "待整理周报" section (cleared)
         new_week_sections.append(MarkdownSection(level=2, title="待整理周报", content=""))
 
-        # Check if team summary exists and preserve it
+        # Check if team summary exists and preserve it (or add placeholder if empty)
+        team_summary_found = False
         for i in range(week_idx + 1, week_end_idx):
             if sections[i].level == 2 and "本周团队重点工作总结" in sections[i].title:
+                # If found but empty, add placeholder
+                if not sections[i].content.strip():
+                    sections[i].content = "*[待 Agent 根据各成员周报生成团队总结]*"
                 new_week_sections.append(sections[i])
+                team_summary_found = True
                 break
-        else:
-            new_week_sections.append(MarkdownSection(level=2, title="本周团队重点工作总结", content=""))
+
+        if not team_summary_found:
+            # Create team summary with placeholder prompt
+            team_summary_content = "*[待 Agent 根据各成员周报生成团队总结]*"
+            new_week_sections.append(MarkdownSection(level=2, title="本周团队重点工作总结", content=team_summary_content))
 
         # Collect existing members (to preserve their data if any)
         existing_members = {}
