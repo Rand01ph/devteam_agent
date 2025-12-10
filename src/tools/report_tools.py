@@ -312,6 +312,42 @@ def create_report_tools(report_manager, report_generator, config):
                 }]
             }
 
+    @tool(
+        "update_team_summary",
+        "Update the team weekly summary (本周团队重点工作总结). Use this tool to update or create the team-level summary for a specific week. This is different from individual member reports.",
+        {
+            "year": int,
+            "month": int,
+            "week_num": int,
+            "summary_content": str  # The team summary content
+        }
+    )
+    async def update_team_summary(args: dict[str, Any]):
+        """Update the team summary for a specific week."""
+        year = args["year"]
+        month = args["month"]
+        week_num = args["week_num"]
+        summary_content = args["summary_content"]
+
+        result = report_manager.update_team_summary(
+            year, month, week_num, summary_content
+        )
+
+        if result["success"]:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": result["message"]
+                }]
+            }
+        else:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"更新失败: {result['error']}"
+                }]
+            }
+
     return [
         read_weekly_report,
         update_weekly_report,
@@ -319,5 +355,6 @@ def create_report_tools(report_manager, report_generator, config):
         add_personal_summary,
         organize_weekly_report,
         read_month_report,
-        list_reports
+        list_reports,
+        update_team_summary
     ]
