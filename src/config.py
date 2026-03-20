@@ -58,10 +58,42 @@ class JiraConfig:
 
 
 @dataclass
+class ClaudeConfig:
+    """Claude API configuration."""
+    auth_token: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+
+    @classmethod
+    def from_env(cls) -> "ClaudeConfig":
+        """Load Claude config from environment variables."""
+        return cls(
+            auth_token=os.getenv("ANTHROPIC_AUTH_TOKEN"),
+            base_url=os.getenv("ANTHROPIC_BASE_URL"),
+            model=os.getenv("ANTHROPIC_MODEL")
+        )
+
+    def to_env_dict(self) -> dict[str, str]:
+        """Convert to environment variables dict for ClaudeAgentOptions."""
+        env: dict[str, str] = {}
+        auth_token = self.auth_token
+        if auth_token is not None:
+            env["ANTHROPIC_AUTH_TOKEN"] = auth_token
+        base_url = self.base_url
+        if base_url is not None:
+            env["ANTHROPIC_BASE_URL"] = base_url
+        model = self.model
+        if model is not None:
+            env["ANTHROPIC_MODEL"] = model
+        return env
+
+
+@dataclass
 class AgentConfig:
     """DevTeam Agent configuration."""
     gitlab: GitLabConfig
     jira: JiraConfig
+    claude: ClaudeConfig
     reports_dir: str
     team_members: list[str]  # List of team member names
 
@@ -70,6 +102,7 @@ class AgentConfig:
         """Load agent config from environment variables."""
         gitlab = GitLabConfig.from_env()
         jira = JiraConfig.from_env()
+        claude = ClaudeConfig.from_env()
 
         # Reports directory, default to data/reports
         reports_dir = os.getenv("REPORTS_DIR", "data/reports")
@@ -84,6 +117,7 @@ class AgentConfig:
         return cls(
             gitlab=gitlab,
             jira=jira,
+            claude=claude,
             reports_dir=reports_dir,
             team_members=team_members
         )

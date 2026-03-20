@@ -36,7 +36,7 @@ class DevTeamAgent:
         # Load environment variables
         env_path = Path(__file__).parent.parent / ".env"
         if env_path.exists():
-            load_dotenv(env_path)
+            load_dotenv(env_path, override=True)
 
         # Load configuration
         try:
@@ -182,13 +182,17 @@ class DevTeamAgent:
 {team_members}
 """
 
+        # Build Claude env dict from config
+        claude_env = self.config.claude.to_env_dict()
+
         # Initialize Claude client
         tool_names = [f"mcp__devteam__{tool.name}" for tool in self.tools]
         options = ClaudeAgentOptions(
             mcp_servers={"devteam": self.mcp_server},
             allowed_tools=["Read", "Write"] + tool_names,
             permission_mode="acceptEdits",
-            system_prompt=system_prompt.format(team_members=", ".join(self.config.team_members))
+            system_prompt=system_prompt.format(team_members=", ".join(self.config.team_members)),
+            env=claude_env if claude_env else {},
         )
 
         self.client = ClaudeSDKClient(options)

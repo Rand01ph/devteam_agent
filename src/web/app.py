@@ -43,7 +43,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 # Load environment variables
 env_path = PROJECT_ROOT / ".env"
 if env_path.exists():
-    load_dotenv(env_path)
+    load_dotenv(env_path, override=True)
 
 # FastAPI app
 app = FastAPI(title="DevTeam Agent")
