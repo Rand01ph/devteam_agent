@@ -7,6 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from claude_agent_sdk import (
+    AgentDefinition,
     ClaudeSDKClient,
     ClaudeAgentOptions,
     AssistantMessage,
@@ -48,6 +49,9 @@ class DevTeamAgent:
             print("请检查 .env 文件中的配置。")
             raise
 
+        # Build Claude env dict from config
+        claude_env = self.config.claude.to_env_dict()
+
         # Initialize clients
         self.gitlab_client = GitLabClient(
             self.config.gitlab.url,
@@ -70,7 +74,13 @@ class DevTeamAgent:
         )
 
         # Initialize report generator
-        self.report_generator = ReportGenerator(self.gitlab_client, self.jira_client)
+        self.report_generator = ReportGenerator(
+            self.gitlab_client,
+            self.jira_client,
+            claude_env=claude_env,
+            claude_model=self.config.claude.model,
+            cwd=str(Path(__file__).parent.parent),
+        )
 
         # Create MCP tools
         self.tools = []
@@ -107,13 +117,21 @@ class DevTeamAgent:
 
 当用户说"整理周报"或类似指令时：
 1. 确定日期范围（年、月、周数、起止日期）
-2. 如果目标周目录还没准备好，先调用 `prepare_week_report_directory` 工具
-3. 调用 `organize_weekly_report` 工具
-4. 工具会自动从目标周目录的 `_pending.md` 中读取原始内容
-5. 工具会按账号名切分成员内容
-6. 每个成员块优先提取 `**本周工作总结**`，并将 `**AI相关事项总结**` / `**AI相关：**` 追加到个人总结
-7. 工具会更新对应 `<account>.md` 中的 `#### 个人总结`，保留已有 `#### 🤖 Agent 总结` 和 `#### 工作明细`
-8. 整理完成后会清空 `_pending.md`，并汇报已整理成员与已跳过的未知成员
+2. 优先调用 `finalize_weekly_report` 工具，完成周目录准备和成员周报整理
+3. 然后调用 `read_weekly_report_bundle` 获取完整周报上下文
+4. 对每位成员：
+   - 如果 `#### 个人总结` 仍是占位符或明显质量不足，必须使用 `member-personal-summarizer` 子代理生成个人总结
+   - 再调用 `update_member_personal_summary` 写回
+5. 所有成员个人总结完成后：
+   - 必须使用 `team-weekly-summarizer` 子代理生成团队总结
+   - 再调用 `update_team_summary` 写回
+6. `finalize_weekly_report` 工具只负责：
+   - 准备周目录（如不存在）
+   - 从目标周目录的 `_pending.md` 中读取原始内容并整理成员周报
+   - 按账号名切分成员内容
+   - 提取 `**本周工作总结**`，并将 `**AI相关事项总结**` / `**AI相关：**` 追加到个人总结
+   - 写入成员周报和月度 markdown 快照
+7. 整理完成后，汇报已整理成员、已跳过的未知成员以及最终团队总结
 
 ## 注意事项
 
@@ -128,19 +146,30 @@ class DevTeamAgent:
 {team_members}
 """
 
-        # Build Claude env dict from config
-        claude_env = self.config.claude.to_env_dict()
-
         # Initialize Claude client
         tool_names = [f"mcp__devteam__{tool.name}" for tool in self.tools]
         options = ClaudeAgentOptions(
             mcp_servers={"devteam": self.mcp_server},
-            allowed_tools=["Read", "Write", "Skill"] + tool_names,
+            allowed_tools=["Read", "Write", "Skill", "Task"] + tool_names,
             permission_mode="acceptEdits",
             system_prompt=system_prompt.format(team_members=", ".join(self.config.team_members)),
             env=claude_env if claude_env else {},
             setting_sources=["project"],
             cwd=str(Path(__file__).parent.parent),
+            agents={
+                ReportGenerator.MEMBER_SUMMARY_SUBAGENT_NAME: AgentDefinition(
+                    description=ReportGenerator.MEMBER_SUMMARY_SUBAGENT_DESCRIPTION,
+                    prompt=ReportGenerator.MEMBER_SUMMARY_SYSTEM_PROMPT,
+                    tools=[],
+                    model="inherit",
+                ),
+                ReportGenerator.TEAM_SUMMARY_SUBAGENT_NAME: AgentDefinition(
+                    description=ReportGenerator.TEAM_SUMMARY_SUBAGENT_DESCRIPTION,
+                    prompt=ReportGenerator.TEAM_SUMMARY_SYSTEM_PROMPT,
+                    tools=[],
+                    model="inherit",
+                ),
+            },
         )
 
         self.client = ClaudeSDKClient(options)
@@ -204,8 +233,8 @@ class DevTeamAgent:
         print("  - 准备第12周周报目录，时间是 2026-03-16 到 2026-03-22")
         print("  - 生成 huangjingfang 本周的周报")
         print("  - 查看本月所有周报")
-        print("  - 整理第12周的待整理周报")
-        print("  - 总结团队本周的工作")
+        print("  - 用固定流水线整理第12周周报，时间是 2026-03-16 到 2026-03-22")
+        print("  - 重新生成第12周的团队总结")
         print("  - 查看 chenjunli 在GitLab上的活动")
         print("=" * 60)
 

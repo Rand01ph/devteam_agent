@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 
 from claude_agent_sdk import (
+    AgentDefinition,
     ClaudeSDKClient,
     ClaudeAgentOptions,
     AssistantMessage,
@@ -70,6 +72,7 @@ class AgentSession:
 
         # Load configuration
         self.config = AgentConfig.from_env()
+        claude_env = self.config.claude.to_env_dict()
 
         # Initialize clients
         gitlab_client = GitLabClient(
@@ -93,7 +96,13 @@ class AgentSession:
         )
 
         # Initialize report generator
-        report_generator = ReportGenerator(gitlab_client, jira_client)
+        report_generator = ReportGenerator(
+            gitlab_client,
+            jira_client,
+            claude_env=claude_env,
+            claude_model=self.config.claude.model,
+            cwd=str(PROJECT_ROOT),
+        )
 
         # Create MCP tools
         tools = []
@@ -124,15 +133,15 @@ class AgentSession:
 
 当用户说"整理周报"或类似指令时：
 1. 确定日期范围（年、月、周数、起止日期）
-2. 如果目标周目录还没准备好，先调用 `prepare_week_report_directory` 工具
-3. 调用 `organize_weekly_report` 工具
-4. 工具会自动：
-   - 从目标周目录的 `_pending.md` 中读取原始内容
-   - 按账号名识别成员块
-   - 提取 `**本周工作总结**`，并把 `**AI相关事项总结**` / `**AI相关：**` 追加到个人总结
-   - 更新对应账号名的成员周报文件
-   - 清空 `_pending.md`
-5. 汇报整理结果（包括已跳过的未知成员）
+2. 先调用 `finalize_weekly_report` 工具，完成周目录准备和成员周报整理
+3. 再调用 `read_weekly_report_bundle` 获取本周完整上下文
+4. 对每位成员：
+   - 如果 `#### 个人总结` 仍是占位符或质量不足，必须使用 `member-personal-summarizer` 子代理生成个人总结
+   - 再调用 `update_member_personal_summary` 写回
+5. 所有成员个人总结完成后：
+   - 必须使用 `team-weekly-summarizer` 子代理生成团队总结
+   - 再调用 `update_team_summary` 写回
+6. 汇报整理结果（包括已跳过的未知成员和最终团队总结）
 
 ## 周报生成规则
 
@@ -185,10 +194,9 @@ class AgentSession:
 
         # Initialize Claude client
         tool_names = [f"mcp__devteam__{tool.name}" for tool in tools]
-        claude_env = self.config.claude.to_env_dict()
         options = ClaudeAgentOptions(
             mcp_servers={"devteam": mcp_server},
-            allowed_tools=["Read", "Write", "Skill"] + tool_names,
+            allowed_tools=["Read", "Write", "Skill", "Task"] + tool_names,
             permission_mode="acceptEdits",
             system_prompt=system_prompt.format(
                 team_members=", ".join(self.config.team_members)
@@ -196,6 +204,20 @@ class AgentSession:
             env=claude_env if claude_env else {},
             setting_sources=["project"],
             cwd=str(PROJECT_ROOT),
+            agents={
+                ReportGenerator.MEMBER_SUMMARY_SUBAGENT_NAME: AgentDefinition(
+                    description=ReportGenerator.MEMBER_SUMMARY_SUBAGENT_DESCRIPTION,
+                    prompt=ReportGenerator.MEMBER_SUMMARY_SYSTEM_PROMPT,
+                    tools=[],
+                    model="inherit",
+                ),
+                ReportGenerator.TEAM_SUMMARY_SUBAGENT_NAME: AgentDefinition(
+                    description=ReportGenerator.TEAM_SUMMARY_SUBAGENT_DESCRIPTION,
+                    prompt=ReportGenerator.TEAM_SUMMARY_SYSTEM_PROMPT,
+                    tools=[],
+                    model="inherit",
+                ),
+            },
         )
 
         self.client = ClaudeSDKClient(options)
@@ -219,6 +241,73 @@ class AgentSession:
 agent_session = AgentSession()
 
 
+def _get_reports_dir(config: AgentConfig) -> Path:
+    """Resolve the configured reports directory against the project root."""
+    reports_dir = Path(config.reports_dir)
+    if not reports_dir.is_absolute():
+        reports_dir = PROJECT_ROOT / reports_dir
+    return reports_dir
+
+
+def _build_report_manager(config: AgentConfig) -> FileReportManager:
+    """Create a report manager for assembling directory-based reports."""
+    return FileReportManager(
+        config.reports_dir,
+        config.team_members,
+        config.team_member_name_map,
+    )
+
+
+def _list_report_entries(reports_dir: Path) -> list[dict[str, str]]:
+    """List report entries from both directory-based and legacy file-based storage."""
+    entries: list[dict[str, str]] = []
+
+    for month_dir in sorted(reports_dir.iterdir(), reverse=True):
+        if not month_dir.is_dir():
+            continue
+        if not re.fullmatch(r"\d{4}-\d{2}", month_dir.name):
+            continue
+        entries.append({
+            "name": f"{month_dir.name}.md",
+            "path": str(month_dir.relative_to(PROJECT_ROOT)),
+            "source": "directory",
+        })
+
+    for file_path in sorted(reports_dir.glob("*.md"), reverse=True):
+        if "-bak" in file_path.name or file_path.name.endswith(".legacy"):
+            continue
+        virtual_name = file_path.name
+        if any(entry["name"] == virtual_name for entry in entries):
+            continue
+        entries.append({
+            "name": virtual_name,
+            "path": str(file_path.relative_to(PROJECT_ROOT)),
+            "source": "file",
+        })
+
+    return entries
+
+
+def _load_report_content(config: AgentConfig, name: str) -> tuple[str, str]:
+    """Load report content from either directory-based or legacy file-based storage."""
+    reports_dir = _get_reports_dir(config)
+
+    month_match = re.fullmatch(r"(\d{4})-(\d{2})\.md", name)
+    if month_match:
+        year = int(month_match.group(1))
+        month = int(month_match.group(2))
+        month_dir = reports_dir / f"{year}-{month:02d}"
+        if month_dir.exists() and month_dir.is_dir():
+            report_manager = _build_report_manager(config)
+            return name, report_manager.read_report(year, month)
+
+    file_path = reports_dir / name
+    if file_path.exists() and file_path.is_file():
+        return name, file_path.read_text(encoding="utf-8")
+
+    raise FileNotFoundError("Report not found")
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Render the main page."""
@@ -230,25 +319,12 @@ async def list_reports():
     """List all report files."""
     try:
         config = AgentConfig.from_env()
-        # Convert relative path to absolute path based on project root
-        reports_dir = Path(config.reports_dir)
-        if not reports_dir.is_absolute():
-            reports_dir = PROJECT_ROOT / reports_dir
+        reports_dir = _get_reports_dir(config)
 
         if not reports_dir.exists():
             return {"reports": []}
 
-        files = []
-        for f in sorted(reports_dir.glob("*.md"), reverse=True):
-            # Skip backup files
-            if "-bak" in f.name:
-                continue
-            files.append({
-                "name": f.name,
-                "path": str(f.relative_to(PROJECT_ROOT)),
-            })
-
-        return {"reports": files}
+        return {"reports": _list_report_entries(reports_dir)}
     except Exception as e:
         return {"reports": [], "error": str(e)}
 
@@ -258,17 +334,10 @@ async def get_report(name: str):
     """Get report content."""
     try:
         config = AgentConfig.from_env()
-        # Convert relative path to absolute path based on project root
-        reports_dir = Path(config.reports_dir)
-        if not reports_dir.is_absolute():
-            reports_dir = PROJECT_ROOT / reports_dir
-        file_path = reports_dir / name
-
-        if not file_path.exists():
-            return {"error": "Report not found"}
-
-        content = file_path.read_text(encoding="utf-8")
-        return {"name": name, "content": content}
+        report_name, content = _load_report_content(config, name)
+        return {"name": report_name, "content": content}
+    except FileNotFoundError as e:
+        return {"error": str(e)}
     except Exception as e:
         return {"error": str(e)}
 

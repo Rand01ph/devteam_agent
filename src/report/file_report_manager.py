@@ -185,6 +185,16 @@ class FileReportManager:
 
         return "\n".join(lines)
 
+    def _sync_month_snapshot(self, year: int, month: int) -> None:
+        """Materialize the assembled month report to a markdown file for compatibility."""
+        content = self.read_report(year, month).strip()
+        snapshot_file = self.reports_dir / f"{year}-{month:02d}.md"
+
+        if content:
+            snapshot_file.write_text(content + "\n", encoding="utf-8")
+        elif snapshot_file.exists():
+            snapshot_file.unlink()
+
     def prepare_week_report_directory(
         self,
         year: int,
@@ -205,6 +215,7 @@ class FileReportManager:
         pending_file = week_dir / "_pending.md"
         meta_file = week_dir / "_meta.json"
         summary_file = week_dir / "_team_summary.md"
+        self._sync_month_snapshot(year, month)
 
         return {
             "success": True,
@@ -220,6 +231,41 @@ class FileReportManager:
                 f"- 团队总结文件: {summary_file}"
             ),
         }
+
+    def get_week_dir(self, year: int, month: int, week_num: int) -> Optional[Path]:
+        """Return the week directory for the given month/week number if it exists."""
+        month_dir = self._get_month_dir(year, month)
+        return self._find_week_dir_by_num(month_dir, week_num)
+
+    def get_week_metadata(self, year: int, month: int, week_num: int) -> Optional[dict]:
+        """Return metadata for a specific week if available."""
+        week_dir = self.get_week_dir(year, month, week_num)
+        if week_dir is None:
+            return None
+
+        meta_file = week_dir / "_meta.json"
+        if not meta_file.exists():
+            return None
+
+        try:
+            return json.loads(meta_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+
+    def get_week_member_reports(self, year: int, month: int, week_num: int) -> dict[str, str]:
+        """Return all member reports for a specific week keyed by account name."""
+        week_dir = self.get_week_dir(year, month, week_num)
+        if week_dir is None:
+            return {}
+
+        reports: dict[str, str] = {}
+        for member_file in sorted(week_dir.glob("*.md")):
+            if member_file.name.startswith("_"):
+                continue
+            content = member_file.read_text(encoding="utf-8").strip()
+            if content:
+                reports[member_file.stem] = content
+        return reports
 
     def get_member_report(self, content: str, week_num: int, member_name: str) -> Optional[str]:
         """Read a member report for a specific week number."""
@@ -260,6 +306,30 @@ class FileReportManager:
             existing_content = member_file.read_text(encoding="utf-8").strip()
             content = self._merge_member_report_content(existing_content, content)
         member_file.write_text(content, encoding="utf-8")
+        self._sync_month_snapshot(year, month)
+
+    def update_member_personal_summary(
+        self,
+        year: int,
+        month: int,
+        week_num: int,
+        member_name: str,
+        personal_summary: str,
+    ) -> dict:
+        """Update only the personal summary section for a specific member report."""
+        week_dir = self.get_week_dir(year, month, week_num)
+        if week_dir is None:
+            return {"success": False, "error": f"Week {week_num} directory not found"}
+
+        member_file = week_dir / f"{member_name}.md"
+        if not member_file.exists():
+            return {"success": False, "error": f"Member report not found for {member_name}"}
+
+        existing_content = member_file.read_text(encoding="utf-8").strip()
+        updated_content = self._replace_personal_summary_section(existing_content, personal_summary.strip())
+        member_file.write_text(updated_content.strip() + "\n", encoding="utf-8")
+        self._sync_month_snapshot(year, month)
+        return {"success": True, "message": f"已更新 {member_name} 的个人总结"}
 
     def _extract_section_content(self, content: str, heading: str) -> Optional[str]:
         """Extract section body from a `#### <heading>` block."""
@@ -489,6 +559,7 @@ class FileReportManager:
         team_summary_file = week_dir / "_team_summary.md"
         if not team_summary_file.exists() or not team_summary_file.read_text(encoding="utf-8").strip():
             team_summary_file.write_text(self.TEAM_SUMMARY_PLACEHOLDER, encoding="utf-8")
+        self._sync_month_snapshot(year, month)
 
         message = f"已整理 {len(members_found)} 位成员的周报: {', '.join(members_found)}"
         if skipped_unknown:
@@ -535,4 +606,5 @@ class FileReportManager:
             content = content[len(prefix):].strip()
 
         summary_file.write_text(content, encoding="utf-8")
+        self._sync_month_snapshot(year, month)
         return {"success": True, "message": f"已更新第{week_num}周的团队工作总结"}
