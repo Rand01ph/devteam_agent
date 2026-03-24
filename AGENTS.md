@@ -6,6 +6,15 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 DevTeam Agent is a team work management agent built with Codex Agent SDK. It integrates with GitLab and Jira to automatically generate and manage weekly/monthly reports for team members.
 
+## Engineering Constitution
+
+- Library-First: implement new behavior as standalone libraries/modules first,
+  then wire them into tools or interfaces.
+- Strict TDD: write failing tests before production changes and keep the
+  red-green-refactor cycle explicit.
+- Functional Core: prefer pure functions for parsing and business rules, and
+  isolate I/O and network effects at the edges.
+
 ## Development Commands
 
 ```bash
