@@ -1,6 +1,8 @@
 """DevTeam Agent - Main entry point."""
 
 import asyncio
+import locale
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -61,7 +63,11 @@ class DevTeamAgent:
         )
 
         # Initialize report manager
-        self.report_manager = FileReportManager(self.config.reports_dir)
+        self.report_manager = FileReportManager(
+            self.config.reports_dir,
+            self.config.team_members,
+            self.config.team_member_name_map,
+        )
 
         # Initialize report generator
         self.report_generator = ReportGenerator(self.gitlab_client, self.jira_client)
@@ -89,19 +95,25 @@ class DevTeamAgent:
 
 ## 周报结构
 
-周报采用以下 Markdown 结构：
-```
-# 年月团队周报
-# 本月工作总结
-# 第N周 MM.DD-MM.DD
-## 待整理周报
-## 本周团队重点工作总结
-## 成员名
-### 本周工作总结
-#### 🤖 Agent 总结
-#### 个人总结
-#### 工作明细
-```
+正式周报使用目录化结构存储：
+- `data/reports/YYYY-MM/MMDD-MMDD/<account>.md`
+- `data/reports/YYYY-MM/MMDD-MMDD/_team_summary.md`
+- `data/reports/YYYY-MM/MMDD-MMDD/_pending.md`
+
+其中 `_pending.md` 是每周的待整理输入稿，用户会把原始周报内容粘贴到这里。
+推荐直接使用账号名作为成员标题，例如 `## huangjingfang`。
+
+## 周报整理规则
+
+当用户说"整理周报"或类似指令时：
+1. 确定日期范围（年、月、周数、起止日期）
+2. 如果目标周目录还没准备好，先调用 `prepare_week_report_directory` 工具
+3. 调用 `organize_weekly_report` 工具
+4. 工具会自动从目标周目录的 `_pending.md` 中读取原始内容
+5. 工具会按账号名切分成员内容
+6. 每个成员块优先提取 `**本周工作总结**`，并将 `**AI相关事项总结**` / `**AI相关：**` 追加到个人总结
+7. 工具会更新对应 `<account>.md` 中的 `#### 个人总结`，保留已有 `#### 🤖 Agent 总结` 和 `#### 工作明细`
+8. 整理完成后会清空 `_pending.md`，并汇报已整理成员与已跳过的未知成员
 
 ## 注意事项
 
@@ -134,6 +146,47 @@ class DevTeamAgent:
         self.client = ClaudeSDKClient(options)
         self.turn_count = 0
 
+    def _read_console_input(self, prompt: str) -> str:
+        """Read one line from stdin with defensive decoding.
+
+        Some terminal/IME combinations can surface console bytes that fail
+        `input()`'s default UTF-8 text decoding. Reading the raw bytes lets us
+        decode with a small fallback chain instead of crashing the session.
+        """
+        print(prompt, end="", flush=True)
+
+        raw_line = sys.stdin.buffer.readline()
+        if raw_line == b"":
+            raise EOFError
+
+        if raw_line.endswith(b"\n"):
+            raw_line = raw_line[:-1]
+        if raw_line.endswith(b"\r"):
+            raw_line = raw_line[:-1]
+
+        encodings: list[str] = []
+        for encoding in (
+            sys.stdin.encoding,
+            locale.getpreferredencoding(False),
+            sys.getfilesystemencoding(),
+            "utf-8",
+            "utf-8-sig",
+            "gb18030",
+            "gbk",
+            "big5",
+        ):
+            if encoding and encoding not in encodings:
+                encodings.append(encoding)
+
+        for encoding in encodings:
+            try:
+                return raw_line.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+
+        # Preserve forward progress even if the terminal emitted unexpected bytes.
+        return raw_line.decode("utf-8", errors="replace")
+
     async def start(self):
         """Start the agent conversation session."""
         await self.client.connect()
@@ -148,14 +201,16 @@ class DevTeamAgent:
         print("  - 'interrupt': 中断当前任务")
         print("  - 'new': 开始新对话")
         print("\n示例问题:")
-        print("  - 生成张三本周的周报")
+        print("  - 准备第12周周报目录，时间是 2026-03-16 到 2026-03-22")
+        print("  - 生成 huangjingfang 本周的周报")
         print("  - 查看本月所有周报")
+        print("  - 整理第12周的待整理周报")
         print("  - 总结团队本周的工作")
-        print("  - 查看李四在GitLab上的活动")
+        print("  - 查看 chenjunli 在GitLab上的活动")
         print("=" * 60)
 
         while True:
-            user_input = input(f"\n[{self.turn_count + 1}] 你: ")
+            user_input = self._read_console_input(f"\n[{self.turn_count + 1}] 你: ")
 
             if user_input.lower() == 'exit':
                 break

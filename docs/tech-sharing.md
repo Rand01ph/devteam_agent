@@ -313,11 +313,11 @@ python main.py
 ```
 Agent 已启动！输入 'exit' 退出。
 
-你: 你好，我叫张三
+你: 你好，我叫 zhangsan
 [调用工具: greet]
 [完成: 1234ms]
 
-Agent: 你好，张三！很高兴认识你！
+Agent: 你好，zhangsan！很高兴认识你！
 
 你: 计算 (1 + 2) * 3
 [调用工具: calculate]

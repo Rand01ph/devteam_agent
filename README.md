@@ -47,7 +47,7 @@ devteam_agent/
 
 # 第1周
 
-## 张三
+## zhangsan
 
 ### 本周工作总结
 
@@ -63,7 +63,7 @@ devteam_agent/
   - ✨ ✅ [PROJ-123](https://jira.../PROJ-123) 实现新功能
   - ...
 
-## 李四
+## lisi
 
 ...
 
@@ -106,8 +106,8 @@ JIRA_USERNAME=your_email@company.com
 JIRA_API_TOKEN=your_jira_api_token
 JIRA_PROJECT_KEYS=  # 可选，留空则跟踪所有项目
 
-# 团队成员
-TEAM_MEMBERS=张三,李四,王五
+# 团队成员账号名
+TEAM_MEMBERS=zhangsan,lisi,wangwu
 ```
 
 ### 3. 获取 API Token
@@ -140,19 +140,19 @@ python -m src.main
 
 **生成周报：**
 ```
-生成张三本周的周报
+生成 zhangsan 本周的周报
 ```
 
 **查看周报：**
 ```
 查看本月所有周报
-查看张三第1周的周报
+查看 zhangsan 第1周的周报
 ```
 
 **查看活动：**
 ```
-查看李四在 GitLab 上的活动
-查看王五在 Jira 上的任务
+查看 lisi 在 GitLab 上的活动
+查看 wangwu 在 Jira 上的任务
 ```
 
 **总结报告：**

@@ -10,6 +10,40 @@ def create_report_tools(report_manager, report_generator, config):
     from claude_agent_sdk import tool
 
     @tool(
+        "prepare_week_report_directory",
+        "Prepare the target week's report directory, metadata file, and _pending.md template before team members' raw weekly reports are pasted in.",
+        {
+            "year": int,
+            "month": int,
+            "week_num": int,
+            "start_date": str,  # ISO format: YYYY-MM-DD
+            "end_date": str,    # ISO format: YYYY-MM-DD
+        }
+    )
+    async def prepare_week_report_directory(args: dict[str, Any]):
+        """Prepare a week report directory and pending template."""
+        year = args["year"]
+        month = args["month"]
+        week_num = args["week_num"]
+        start_date = date.fromisoformat(args["start_date"])
+        end_date = date.fromisoformat(args["end_date"])
+
+        result = report_manager.prepare_week_report_directory(
+            year,
+            month,
+            week_num,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        return {
+            "content": [{
+                "type": "text",
+                "text": result["message"],
+            }]
+        }
+
+    @tool(
         "read_weekly_report",
         "Read a team member's weekly report for a specific week",
         {
@@ -220,7 +254,7 @@ def create_report_tools(report_manager, report_generator, config):
 
     @tool(
         "organize_weekly_report",
-        "Organize raw content in a week section into proper structure. Use this after the user pastes raw weekly reports into the markdown file. It will parse ## member sections and restructure them with proper headings.",
+        "Organize raw content from the target week's _pending.md file into member report files. It primarily uses account-name member sections such as '## huangjingfang'.",
         {
             "year": int,
             "month": int,
@@ -349,6 +383,7 @@ def create_report_tools(report_manager, report_generator, config):
             }
 
     return [
+        prepare_week_report_directory,
         read_weekly_report,
         update_weekly_report,
         generate_weekly_report,

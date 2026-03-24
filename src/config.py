@@ -95,7 +95,8 @@ class AgentConfig:
     jira: JiraConfig
     claude: ClaudeConfig
     reports_dir: str
-    team_members: list[str]  # List of team member names
+    team_members: list[str]  # List of team member account names
+    team_member_name_map: dict[str, str]  # Optional display name -> account name mapping
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -114,10 +115,37 @@ class AgentConfig:
 
         team_members = [name.strip() for name in team_members_str.split(",")]
 
+        team_member_name_map: dict[str, str] = {}
+        team_member_name_map_str = os.getenv("TEAM_MEMBER_NAME_MAP", "").strip()
+        if team_member_name_map_str:
+            for raw_pair in team_member_name_map_str.split(";"):
+                pair = raw_pair.strip()
+                if not pair:
+                    continue
+                if ":" not in pair:
+                    raise ValueError(
+                        f"Invalid TEAM_MEMBER_NAME_MAP entry '{pair}'. "
+                        "Expected format is '显示名:account_name'"
+                    )
+                display_name, account_name = [part.strip() for part in pair.split(":", 1)]
+                if not display_name or not account_name:
+                    raise ValueError(
+                        f"Invalid TEAM_MEMBER_NAME_MAP entry '{pair}'. "
+                        "Both display name and account name are required."
+                    )
+                if display_name in team_member_name_map:
+                    raise ValueError(f"Duplicate display name '{display_name}' in TEAM_MEMBER_NAME_MAP")
+                if account_name not in team_members:
+                    raise ValueError(
+                        f"Mapped account '{account_name}' for '{display_name}' is not present in TEAM_MEMBERS"
+                    )
+                team_member_name_map[display_name] = account_name
+
         return cls(
             gitlab=gitlab,
             jira=jira,
             claude=claude,
             reports_dir=reports_dir,
-            team_members=team_members
+            team_members=team_members,
+            team_member_name_map=team_member_name_map,
         )

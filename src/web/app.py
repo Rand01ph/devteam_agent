@@ -26,7 +26,7 @@ from claude_agent_sdk import (
 from src.config import AgentConfig
 from src.integrations.gitlab_client import GitLabClient
 from src.integrations.jira_client import JiraClient
-from src.report.markdown_manager import MarkdownReportManager
+from src.report.file_report_manager import FileReportManager
 from src.report.generator import ReportGenerator
 from src.tools.report_tools import create_report_tools
 from src.tools.gitlab_tools import create_gitlab_tools
@@ -86,7 +86,11 @@ class AgentSession:
         )
 
         # Initialize report manager
-        report_manager = MarkdownReportManager(self.config.reports_dir)
+        report_manager = FileReportManager(
+            self.config.reports_dir,
+            self.config.team_members,
+            self.config.team_member_name_map,
+        )
 
         # Initialize report generator
         report_generator = ReportGenerator(gitlab_client, jira_client)
@@ -108,49 +112,27 @@ class AgentSession:
 
 ## 周报结构
 
-周报采用以下 Markdown 结构：
-```
-# 年月团队周报
-# 本月工作总结
-# 第N周 MM.DD-MM.DD
-## 待整理周报
-## 本周团队重点工作总结
-## 成员名
-### 本周工作总结
-#### 🤖 Agent 总结
-#### 个人总结
-#### 工作明细
-```
+正式周报使用目录化结构存储：
+- `data/reports/YYYY-MM/MMDD-MMDD/<account>.md`
+- `data/reports/YYYY-MM/MMDD-MMDD/_team_summary.md`
+- `data/reports/YYYY-MM/MMDD-MMDD/_pending.md`
+
+其中 `_pending.md` 是每周的待整理输入稿，用户会把原始周报内容粘贴到这里。
+推荐直接使用账号名作为成员标题，例如 `## huangjingfang`。
 
 ## 周报整理流程（推荐）
 
-用户会将团队成员的原始周报内容粘贴到 `## 待整理周报` 段落中，格式如下：
-```
-## 待整理周报
-
-## 成员名1
-
-**今日工作总结**
-
-（成员1的工作内容...）
-
-## 成员名2
-
-**今日工作总结**
-
-（成员2的工作内容...）
-```
-
 当用户说"整理周报"或类似指令时：
 1. 确定日期范围（年、月、周数、起止日期）
-2. 调用 `organize_weekly_report` 工具
-3. 工具会自动：
-   - 从 `## 待整理周报` 中读取原始内容
-   - 识别所有 `## 成员名` 段落
-   - 移除 `**今日工作总结**` 标题
-   - 将内容整理到标准结构（Agent总结、个人总结、工作明细）
-   - 清空 `## 待整理周报` 段落
-4. 汇报整理结果
+2. 如果目标周目录还没准备好，先调用 `prepare_week_report_directory` 工具
+3. 调用 `organize_weekly_report` 工具
+4. 工具会自动：
+   - 从目标周目录的 `_pending.md` 中读取原始内容
+   - 按账号名识别成员块
+   - 提取 `**本周工作总结**`，并把 `**AI相关事项总结**` / `**AI相关：**` 追加到个人总结
+   - 更新对应账号名的成员周报文件
+   - 清空 `_pending.md`
+5. 汇报整理结果（包括已跳过的未知成员）
 
 ## 周报生成规则
 
@@ -203,13 +185,17 @@ class AgentSession:
 
         # Initialize Claude client
         tool_names = [f"mcp__devteam__{tool.name}" for tool in tools]
+        claude_env = self.config.claude.to_env_dict()
         options = ClaudeAgentOptions(
             mcp_servers={"devteam": mcp_server},
-            allowed_tools=["Read", "Write"] + tool_names,
+            allowed_tools=["Read", "Write", "Skill"] + tool_names,
             permission_mode="acceptEdits",
             system_prompt=system_prompt.format(
                 team_members=", ".join(self.config.team_members)
             ),
+            env=claude_env if claude_env else {},
+            setting_sources=["project"],
+            cwd=str(PROJECT_ROOT),
         )
 
         self.client = ClaudeSDKClient(options)
